@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# deploy.yml
+# Project 1 (Dissertation Hosted on Azure), Stage 5 - CI/CD pipeline.
+#
+# What this does, end to end: every time you push to main, GitHub spins up
+# a temporary Ubuntu machine, checks out this code, builds it exactly like
+# you do locally with `npm run build`, then uploads the result to the Azure
+# Storage Account's $web container - the same manual steps from Stage 2,
+# just automated so you never have to run them by hand again.
+# ---------------------------------------------------------------------------
+
+name: Deploy to Azure
+
+# Only run automatically on pushes to main - a feature branch or a PR
+# won't trigger a deployment, which matches the federated identity
+# credential in github-oidc.tf that ONLY trusts main-branch tokens anyway.
+on:
+  push:
+    branches: [main]
+
+# GitHub Actions workflows get NO permissions by default for security.
+# "id-token: write" is what lets this workflow request the short-lived
+# OIDC token described in github-oidc.tf - without this exact permission,
+# the azure/login step below fails outright.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Downloads this repo's code onto the temporary runner machine -
+      # without this step there'd be no source code to build at all.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Installs Node.js on the runner. Vite 7 (used by this project)
+      # requires a fairly recent Node version - 22 is current LTS as this
+      # was written. If a future Node major version breaks something here,
+      # that'll show up as a clear build error naming the incompatibility.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm # caches node_modules between runs based on package-lock.json, so builds don't redownload every dependency from scratch every time
+
+      # Installs dependencies from package-lock.json EXACTLY as pinned -
+      # deliberately not `npm install`, which could pick up newer versions
+      # than what's actually been tested locally.
+      - name: Install dependencies
+        run: npm ci
+
+      # Builds the production bundle into dist/. The VITE_ prefixed
+      # variables below get baked into the built JavaScript at this point -
+      # Vite reads any VITE_-prefixed environment variable present during
+      # build, not just ones from a .env file, so setting them here works
+      # exactly like your local .env file does (which is gitignored and
+      # doesn't exist on this runner at all).
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      # This is the OIDC login described in github-oidc.tf - no password or
+      # client secret anywhere. GitHub generates a short-lived token proving
+      # "this is really a run of amaadh2/rpg-map-tracker on main", and Azure
+      # AD exchanges it for a real (also short-lived) Azure access token,
+      # because we told it to trust exactly that combination.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Clears out whatever's currently in $web before uploading. Without
+      # this, files removed or renamed in this build (e.g. an old JS chunk
+      # from a previous version) would linger in the container forever,
+      # since upload-batch only adds/overwrites, it doesn't delete anything
+      # missing from the new build.
+      - name: Clear existing site content
+        run: |
+          az storage blob delete-batch \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --source '$web' \
+            --auth-mode login
+
+      # Uploads the fresh build. --auth-mode login uses the OIDC identity
+      # from the step above, authorised via the "Storage Blob Data
+      # Contributor" role assignment in github-oidc.tf - no account key
+      # involved anywhere in this pipeline.
+      - name: Upload build to $web
+        run: |
+          az storage blob upload-batch \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --auth-mode login \
+            -d '$web' \
+            -s dist \
+            --overwrite
