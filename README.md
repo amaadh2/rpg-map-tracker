@@ -66,6 +66,12 @@ Static build (`npm run build`) hosted directly on Azure Blob Storage static webs
 **Login**
 ![Login](docs/screenshots/login.png)
 
+**Statistics** — per-game completion breakdown by subtype, with time-remaining estimates
+![Statistics](docs/screenshots/statistics.png)
+
+**Comparison** — side-by-side progress across all 3 games
+![Comparison](docs/screenshots/comparison.png)
+
 ## Cost notes
 
 **Actual spend: £0.01** (Azure Cost Management, `rg-dissertation-azure` resource group).
